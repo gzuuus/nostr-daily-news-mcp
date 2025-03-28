@@ -1,0 +1,18 @@
+{
+  "relays": {
+    "trending": ["wss://algo.utxo.one"],
+    "news": ["wss://news.utxo.one"],
+    "custom": []
+  },
+  "rssFeeds": {
+    "stackerNews": "https://stacker.news/rss",
+    "hackerNews": {
+      "newest": "https://hnrss.org/newest",
+      "frontpage": "https://hnrss.org/frontpage",
+      "bestComments": "https://hnrss.org/bestcomments",
+      "ask": "https://hnrss.org/ask",
+      "show": "https://hnrss.org/show"
+    },
+    "custom": {}
+  }
+}
