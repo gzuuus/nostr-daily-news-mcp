@@ -24,73 +24,6 @@ bun install
 bun start
 ```
 
-## Testing
-
-To test the MCP server, run:
-
-```bash
-bun run src/test.ts
-```
-
-## MCP Tools
-
-This server implements the following MCP tools:
-
-### fetch-trending-notes
-
-Fetches trending notes from algo.utxo.one.
-
-```typescript
-// Example client usage
-const result = await client.callTool({
-  name: "fetch-trending-notes",
-  arguments: { limit: 10 },
-});
-```
-
-### fetch-news-notes
-
-Fetches news notes from news.utxo.one.
-
-```typescript
-// Example client usage
-const result = await client.callTool({
-  name: "fetch-news-notes",
-  arguments: { limit: 5 },
-});
-```
-
-### fetch-stacker-news
-
-Fetches latest news and discussions from Stacker News RSS feed.
-
-```typescript
-// Example client usage
-const result = await client.callTool({
-  name: "fetch-stacker-news",
-  arguments: { limit: 10 },
-});
-```
-
-### fetch-custom-events
-
-Fetches Nostr events with custom filters from specified relay URLs.
-
-```typescript
-// Example client usage
-const result = await client.callTool({
-  name: "fetch-custom-events",
-  arguments: {
-    relays: ["wss://relay.damus.io", "wss://relay.snort.social"],
-    limit: 5,
-    kinds: [1],
-    authors: ["pubkey1", "pubkey2"],
-    since: 1648771200,
-    until: 1680307200,
-  },
-});
-```
-
 ## Development
 
 This project was created using:
@@ -103,4 +36,3 @@ This project was created using:
 ## Project Structure
 
 - `src/index.ts` - Main MCP server implementation
-- `src/test.ts` - Test script to verify the server functionality

@@ -65,26 +65,24 @@ const DEFAULT_CONFIG: Config = {
   },
 };
 
+/**
+ * Load configuration from file, falling back to example or default config if necessary
+ */
 function loadConfig(): Config {
   try {
-    // Check if config file exists
     if (fs.existsSync(CONFIG_PATH)) {
-      const configData = fs.readFileSync(CONFIG_PATH, 'utf8');
-      return JSON.parse(configData) as Config;
+      return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) as Config;
     }
 
-    // If config doesn't exist, check for example config
     if (fs.existsSync(CONFIG_EXAMPLE_PATH)) {
       console.error('Config file not found. Creating from example...');
-      const exampleConfigData = fs.readFileSync(CONFIG_EXAMPLE_PATH, 'utf8');
-      const exampleConfig = JSON.parse(exampleConfigData) as Config;
-
-      // Save the example config as the new config file
+      const exampleConfig = JSON.parse(
+        fs.readFileSync(CONFIG_EXAMPLE_PATH, 'utf8')
+      ) as Config;
       saveConfig(exampleConfig);
       return exampleConfig;
     }
 
-    // If neither exists, use defaults
     console.error(
       'No config or example config found. Creating with defaults...'
     );
@@ -97,7 +95,9 @@ function loadConfig(): Config {
   }
 }
 
-// Save configuration
+/**
+ * Save configuration to file
+ */
 function saveConfig(config: Config): void {
   try {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
@@ -111,30 +111,48 @@ let CONFIG = loadConfig();
 
 const rssParser = new Parser();
 
+/**
+ * Fetch Nostr events from specified relays with given filter
+ */
 async function fetchEvents(
   relays: string[],
   filter: Filter = { limit: DEFAULT_LIMIT }
 ): Promise<NostrEvent[]> {
-  if (!filter.limit) {
-    filter.limit = DEFAULT_LIMIT;
-  }
+  filter.limit = filter.limit || DEFAULT_LIMIT;
 
-  const events = await pool.querySync(relays, filter);
-  return events.sort((a, b) => b.created_at - a.created_at);
+  try {
+    const events = await pool.querySync(relays, filter);
+    return events.sort((a, b) => b.created_at - a.created_at);
+  } catch (error) {
+    console.error(
+      `Error fetching events from relays [${relays.join(', ')}]:`,
+      error
+    );
+    throw error;
+  }
 }
 
+/**
+ * Fetch trending notes from configured relays
+ */
 async function fetchTrendingNotes(
   limit: number = DEFAULT_LIMIT
 ): Promise<NostrEvent[]> {
   return fetchEvents(CONFIG.relays.trending, { limit });
 }
 
+/**
+ * Fetch news notes from configured relays
+ */
 async function fetchNewsNotes(
   limit: number = DEFAULT_LIMIT
 ): Promise<NostrEvent[]> {
   return fetchEvents(CONFIG.relays.news, { limit });
 }
 
+/**
+ * Fetch notes from a named relay group in the configuration
+ */
 async function fetchCustomRelayNotes(
   relayName: string,
   limit: number = DEFAULT_LIMIT
@@ -143,22 +161,27 @@ async function fetchCustomRelayNotes(
     return fetchTrendingNotes(limit);
   } else if (relayName === 'news') {
     return fetchNewsNotes(limit);
-  } else if (CONFIG.relays[relayName]) {
-    return fetchEvents(CONFIG.relays[relayName], { limit });
-  } else {
-    throw new Error(`Relay group '${relayName}' not found in configuration`);
   }
+
+  if (CONFIG.relays[relayName]) {
+    return fetchEvents(CONFIG.relays[relayName], { limit });
+  }
+
+  throw new Error(`Relay group '${relayName}' not found in configuration`);
 }
 
 interface FormattedItem {
   date: string;
-  title: string;
+  title?: string;
   author: string;
   content: string;
   link?: string;
   metadata?: Record<string, string>;
 }
 
+/**
+ * Convert various timestamp formats to ISO string
+ */
 function formatDate(timestamp: number | string | Date): string {
   const date =
     typeof timestamp === 'number'
@@ -167,10 +190,12 @@ function formatDate(timestamp: number | string | Date): string {
   return date.toISOString();
 }
 
+/**
+ * Convert a Nostr event to our standard formatted item structure
+ */
 function nostrEventToFormattedItem(event: NostrEvent): FormattedItem {
   return {
     date: formatDate(event.created_at),
-    title: '', // Nostr events don't have titles
     author: event.pubkey ? `${event.pubkey.substring(0, 8)}...` : '',
     content: event.content,
     metadata:
@@ -178,53 +203,158 @@ function nostrEventToFormattedItem(event: NostrEvent): FormattedItem {
   };
 }
 
+/**
+ * Convert an RSS item to our standard formatted item structure
+ */
 function rssItemToFormattedItem(item: Parser.Item): FormattedItem {
-  return {
-    date: item.pubDate ? formatDate(item.pubDate) : 'Unknown date',
-    title: item.title || '',
-    author: item.creator || '',
-    content: item.contentSnippet || '',
-    link: item.link || '',
-    metadata: item.categories?.length
-      ? { categories: item.categories.join(', ') }
-      : undefined,
-  };
+  try {
+    return {
+      date: getItemDate(item),
+      title: item.title || '',
+      author: extractAuthor(item),
+      content: item.contentSnippet || item.content || '',
+      link: item.link || '',
+      metadata: getItemMetadata(item),
+    };
+  } catch (error) {
+    console.error('Error formatting RSS item:', error);
+    return {
+      date: 'Unknown date',
+      title: item.title || 'Unknown title',
+      author: 'Unknown',
+      content: 'Error processing content',
+      link: item.link || '',
+    };
+  }
 }
 
-function formatItem(item: FormattedItem): string {
-  let output = `[${item.date}]`;
+/**
+ * Get the date from an RSS item, with fallbacks
+ */
+function getItemDate(item: Parser.Item): string {
+  if (item.pubDate) return formatDate(item.pubDate);
+  if (item.isoDate) return formatDate(item.isoDate);
+  return 'Unknown date';
+}
 
-  if (item.title) {
-    output += ` ${item.title}`;
+/**
+ * Get metadata from an RSS item
+ */
+function getItemMetadata(
+  item: Parser.Item
+): Record<string, string> | undefined {
+  const categories = processCategories(item.categories);
+  return categories ? { categories } : undefined;
+}
+
+/**
+ * Extract author information from an RSS item
+ */
+function extractAuthor(item: Parser.Item): string {
+  try {
+    if (item.creator) return item.creator;
+    const itemAny = item as any;
+    if (itemAny.dcCreator) return itemAny.dcCreator;
+    if (itemAny['dc:creator']) return itemAny['dc:creator'];
+
+    const categories = item.categories;
+    if (categories && Array.isArray(categories) && categories.length > 0) {
+      const firstCategory = categories[0];
+      if (
+        typeof firstCategory === 'object' &&
+        firstCategory !== null &&
+        '_' in firstCategory
+      ) {
+        const categoryValue = (firstCategory as any)._;
+        if (typeof categoryValue === 'string') {
+          return categoryValue;
+        }
+      }
+    }
+
+    return 'Unknown';
+  } catch (error) {
+    console.error('Error extracting author:', error);
+    return 'Unknown';
   }
+}
+
+/**
+ * Process categories from an RSS item into a string
+ */
+function processCategories(categories: any): string | undefined {
+  try {
+    if (!categories || !Array.isArray(categories) || categories.length === 0) {
+      return undefined;
+    }
+
+    return categories
+      .map((cat: any) => {
+        if (typeof cat === 'string') {
+          return cat;
+        }
+
+        if (typeof cat === 'object' && cat !== null) {
+          if ('_' in cat) {
+            const categoryValue = (cat as any)._;
+            if (typeof categoryValue === 'string') {
+              return categoryValue;
+            }
+          }
+
+          try {
+            return JSON.stringify(cat);
+          } catch {
+            return 'Unknown category';
+          }
+        }
+
+        return String(cat);
+      })
+      .join(', ');
+  } catch (error) {
+    console.error('Error processing categories:', error);
+    return undefined;
+  }
+}
+
+/**
+ * Format an item for display with consistent formatting
+ */
+function formatItem(item: FormattedItem): string {
+  const parts = [`[${item.date}]${item.title ? ` ${item.title}` : ''}`];
 
   if (item.author) {
-    output += `\nAuthor: ${item.author}`;
+    parts.push(`Author: ${item.author}`);
   }
 
   if (item.metadata) {
     for (const [key, value] of Object.entries(item.metadata)) {
       if (value) {
-        output += `\n${key.charAt(0).toUpperCase() + key.slice(1)}: ${value}`;
+        const formattedKey = key.charAt(0).toUpperCase() + key.slice(1);
+        parts.push(`${formattedKey}: ${value}`);
       }
     }
   }
 
   if (item.content) {
-    output += `\n${item.content}`;
+    parts.push(item.content);
   }
 
   if (item.link) {
-    output += `\n${item.link}`;
+    parts.push(item.link);
   }
 
-  return output;
+  return parts.join('\n');
 }
 
 function formatNostrEvent(event: NostrEvent): string {
   return formatItem(nostrEventToFormattedItem(event));
 }
 
+/**
+ * Fetch and parse an RSS feed from a URL
+ */
 async function fetchRssFeed(
   feedUrl: string,
   limit: number = DEFAULT_LIMIT
@@ -238,39 +368,56 @@ async function fetchRssFeed(
   }
 }
 
+/**
+ * Fetch items from Stacker News RSS feed
+ */
 async function fetchStackerNews(
   limit: number = DEFAULT_LIMIT
 ): Promise<Parser.Item[]> {
   return fetchRssFeed(CONFIG.rssFeeds.stackerNews as string, limit);
 }
 
+/**
+ * Fetch items from Hacker News RSS feed by type
+ */
 async function fetchHackerNews(
-  type: keyof typeof CONFIG.rssFeeds.hackerNews = 'newest',
+  type: keyof HackerNewsConfig = 'newest',
   limit: number = DEFAULT_LIMIT
 ): Promise<Parser.Item[]> {
   const hackerNews = CONFIG.rssFeeds.hackerNews as HackerNewsConfig;
-  return fetchRssFeed(hackerNews[type] as string, limit);
+  const feedUrl = hackerNews[type];
+  if (!feedUrl) {
+    throw new Error(
+      `Hacker News feed type '${type}' not found in configuration`
+    );
+  }
+  return fetchRssFeed(feedUrl, limit);
 }
 
+/**
+ * Fetch items from a named RSS feed in the configuration
+ */
 async function fetchCustomRssFeed(
   feedName: string,
   limit: number = DEFAULT_LIMIT
 ): Promise<Parser.Item[]> {
   if (feedName === 'stackerNews') {
     return fetchStackerNews(limit);
-  } else if (feedName.startsWith('hackerNews.')) {
+  }
+
+  if (feedName.startsWith('hackerNews.')) {
     const type = feedName.split(
       '.'
     )[1] as keyof typeof CONFIG.rssFeeds.hackerNews;
     return fetchHackerNews(type, limit);
-  } else {
-    const customFeeds = CONFIG.rssFeeds.custom as Record<string, string>;
-    if (customFeeds[feedName]) {
-      return fetchRssFeed(customFeeds[feedName], limit);
-    } else {
-      throw new Error(`RSS feed '${feedName}' not found in configuration`);
-    }
   }
+
+  const customFeeds = CONFIG.rssFeeds.custom as Record<string, string>;
+  if (customFeeds[feedName]) {
+    return fetchRssFeed(customFeeds[feedName], limit);
+  }
+
+  throw new Error(`RSS feed '${feedName}' not found in configuration`);
 }
 
 function formatRssItem(item: Parser.Item): string {
@@ -288,16 +435,19 @@ function handleToolError(error: unknown, errorPrefix: string) {
   };
 }
 
+/**
+ * Generic tool handler factory that handles fetching data and formatting the response
+ * @typeparam T Type of items being fetched and formatted
+ */
 function createToolHandler<T>(
   fetchFunction: (limit: number, ...args: any[]) => Promise<T[]>,
   formatFunction: (item: T) => string,
   notFoundMessage: string,
   errorPrefix: string
 ) {
-  return async (params: any, extra: any) => {
+  return async (params: any) => {
     try {
       const { limit, ...otherParams } = params;
-
       const items = await fetchFunction(limit, ...Object.values(otherParams));
 
       if (items.length === 0) {
@@ -306,13 +456,11 @@ function createToolHandler<T>(
         };
       }
 
-      const formattedItems = items.map(formatFunction);
-
       return {
         content: [
           {
             type: 'text' as const,
-            text: formattedItems.join('\n\n'),
+            text: items.map(formatFunction).join('\n\n'),
           },
         ],
       };
@@ -322,6 +470,9 @@ function createToolHandler<T>(
   };
 }
 
+/**
+ * Creates a handler for Nostr event tools
+ */
 function createNotesToolHandler(
   fetchFunction: (limit: number) => Promise<NostrEvent[]>,
   notFoundMessage: string
@@ -334,6 +485,9 @@ function createNotesToolHandler(
   );
 }
 
+/**
+ * Creates a handler for RSS feed tools
+ */
 function createRssToolHandler(
   fetchFunction: (limit: number) => Promise<Parser.Item[]>,
   notFoundMessage: string
@@ -368,6 +522,9 @@ async function startServer() {
     createNotesToolHandler(fetchNewsNotes, 'No news notes found.')
   );
 
+  /**
+   * Custom fetch events tool handler that builds a filter from parameters
+   */
   server.tool(
     'fetch-custom-events',
     'Fetch Nostr events with custom filters from specified relay URLs',
@@ -381,12 +538,14 @@ async function startServer() {
     },
     async ({ relays, limit, kinds, authors, since, until }) => {
       try {
+        // Build filter from parameters
         const filter: Filter = { limit };
         if (kinds) filter.kinds = kinds;
         if (authors) filter.authors = authors;
         if (since) filter.since = since;
         if (until) filter.until = until;
 
+        // Fetch and format events
         const events = await fetchEvents(relays, filter);
 
         if (events.length === 0) {
@@ -394,7 +553,7 @@ async function startServer() {
             content: [
               {
                 type: 'text' as const,
-                text: `No events found for the specified filter.`,
+                text: 'No events found for the specified filter.',
               },
             ],
           };
@@ -414,6 +573,9 @@ async function startServer() {
     }
   );
 
+  /**
+   * Fetch from a configured relay group
+   */
   server.tool(
     'fetch-relay-group',
     'Fetch notes from a configured relay group',
@@ -421,33 +583,13 @@ async function startServer() {
       relayGroup: z.string(),
       limit: z.number().optional().default(DEFAULT_LIMIT),
     },
-    async ({ relayGroup, limit }) => {
-      try {
-        const events = await fetchCustomRelayNotes(relayGroup, limit);
-
-        if (events.length === 0) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `No events found for relay group '${relayGroup}'.`,
-              },
-            ],
-          };
-        }
-
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: events.map(formatNostrEvent).join('\n\n'),
-            },
-          ],
-        };
-      } catch (error) {
-        return handleToolError(error, 'Error fetching events from relay group');
-      }
-    }
+    createToolHandler<NostrEvent>(
+      // Adapter function that matches the expected signature
+      (limit, relayGroup) => fetchCustomRelayNotes(relayGroup, limit),
+      formatNostrEvent,
+      'No events found for the specified relay group.',
+      'Error fetching events from relay group'
+    )
   );
 
   server.tool(
@@ -457,6 +599,9 @@ async function startServer() {
     createRssToolHandler(fetchStackerNews, 'No Stacker News items found.')
   );
 
+  /**
+   * Fetch from Hacker News RSS feed by type
+   */
   server.tool(
     'fetch-hacker-news',
     'Fetch latest news and discussions from Hacker News RSS feed',
@@ -467,33 +612,17 @@ async function startServer() {
         .optional()
         .default('newest'),
     },
-    // Use a specialized handler for Hacker News that can handle the type parameter
-    async ({ limit, type }, extra: any) => {
-      try {
-        const items = await fetchHackerNews(type, limit);
-
-        if (items.length === 0) {
-          return {
-            content: [
-              { type: 'text' as const, text: 'No Hacker News items found.' },
-            ],
-          };
-        }
-
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: items.map(formatRssItem).join('\n\n'),
-            },
-          ],
-        };
-      } catch (error) {
-        return handleToolError(error, 'Error fetching Hacker News RSS feed');
-      }
-    }
+    createToolHandler<Parser.Item>(
+      (limit, type) => fetchHackerNews(type, limit),
+      formatRssItem,
+      'No Hacker News items found.',
+      'Error fetching Hacker News RSS feed'
+    )
   );
 
+  /**
+   * Fetch from a custom RSS feed by name
+   */
   server.tool(
     'fetch-custom-rss',
     'Fetch news from a custom RSS feed',
@@ -501,33 +630,12 @@ async function startServer() {
       feedName: z.string(),
       limit: z.number().optional().default(DEFAULT_LIMIT),
     },
-    async ({ feedName, limit }) => {
-      try {
-        const items = await fetchCustomRssFeed(feedName, limit);
-
-        if (items.length === 0) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `No items found for RSS feed '${feedName}'.`,
-              },
-            ],
-          };
-        }
-
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: items.map(formatRssItem).join('\n\n'),
-            },
-          ],
-        };
-      } catch (error) {
-        return handleToolError(error, 'Error fetching custom RSS feed');
-      }
-    }
+    createToolHandler<Parser.Item>(
+      (limit, feedName) => fetchCustomRssFeed(feedName, limit),
+      formatRssItem,
+      'No items found for the specified RSS feed.',
+      'Error fetching custom RSS feed'
+    )
   );
 
   // Configuration management tools
